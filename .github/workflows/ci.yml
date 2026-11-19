@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  analyze-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.38.4
+          cache: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/velora_engine/go.mod
+          cache-dependency-path: native/velora_engine/go.sum
+
+      - name: Build the torrent engine
+        shell: pwsh
+        run: ./scripts/build_engine.ps1
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
