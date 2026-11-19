@@ -147,6 +147,22 @@ class SettingsProvider extends ChangeNotifier {
     _save('auroraQuality', v.name);
   }
 
+  /// Keep downloaded video between sessions (the cache survives restarts).
+  bool get keepCache =>
+      (_box?.get('keepCache', defaultValue: true) as bool?) ?? true;
+  set keepCache(bool v) {
+    _box?.put('keepCache', v);
+    notifyListeners();
+  }
+
+  /// At the end of an episode, show "Up next" and start the next one.
+  bool get autoplayNext =>
+      (_box?.get('autoplayNext', defaultValue: true) as bool?) ?? true;
+  set autoplayNext(bool v) {
+    _box?.put('autoplayNext', v);
+    notifyListeners();
+  }
+
   set reduceGlassEnabled(bool v) {
     _reduceGlass = v;
     reduceGlass.value = v;

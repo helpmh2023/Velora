@@ -22,6 +22,21 @@ Future<Directory> initStorage() async {
   return dir;
 }
 
+/// Folder for the torrent engine's downloaded data: the app's cache
+/// directory (`%LOCALAPPDATA%\Velora\Velora\engine` on Windows), so
+/// it survives restarts and is not swept like the temp folder.
+Future<Directory> engineCacheDir() async {
+  final base = await getApplicationCacheDirectory();
+  final dir = Directory(p.join(base.path, 'engine'));
+  await dir.create(recursive: true);
+  // Version 1.0.1 and earlier kept it in the temp folder; remove that copy.
+  try {
+    final old = Directory(p.join(Directory.systemTemp.path, 'velora-cache'));
+    if (old.existsSync()) old.deleteSync(recursive: true);
+  } catch (_) {}
+  return dir;
+}
+
 /// Early builds stored the boxes directly in Documents. Move them over
 /// (never overwriting data that is already in [to]) and tidy up lock files.
 /// Returns the names that were moved.

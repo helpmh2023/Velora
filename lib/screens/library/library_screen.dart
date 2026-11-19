@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/smooth_scroll.dart';
@@ -29,10 +29,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget build(BuildContext context) {
     final lib = context.watch<LibraryProvider>();
     final cont = lib.continueWatching;
+    final next = lib.nextUp;
     final favs = lib.favourites;
     void open(MetaItem m) => HomeScreen.openDetails(context, m);
 
-    if (cont.isEmpty && favs.isEmpty) {
+    if (cont.isEmpty && next.isEmpty && favs.isEmpty) {
       return const Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -61,7 +62,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       controller: _scroll,
       padding: const EdgeInsets.only(top: 12, bottom: 48),
       children: [
-        if (cont.isNotEmpty) ContinueRow(items: cont, onOpenDetails: open),
+        if (cont.isNotEmpty || next.isNotEmpty)
+          ContinueRow(items: cont, nextUp: next, onOpenDetails: open),
         if (favs.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(40, 12, 40, 0),

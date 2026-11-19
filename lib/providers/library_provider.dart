@@ -4,12 +4,18 @@ import 'package:flutter/foundation.dart';
 import 'package:hive_ce/hive.dart';
 
 import '../models/meta_item.dart';
+import '../models/next_up.dart';
 import '../models/watch_progress.dart';
 
 /// Favourites + watch progress, persisted in two Hive boxes.
 /// Values are JSON strings (robust against schema changes).
 class LibraryProvider extends ChangeNotifier {
-  LibraryProvider(this._favBox, this._progressBox, [this._watchedBox]) {
+  LibraryProvider(
+    this._favBox,
+    this._progressBox, [
+    this._watchedBox,
+    this._nextUpBox,
+  ]) {
     _load();
   }
 
@@ -19,6 +25,10 @@ class LibraryProvider extends ChangeNotifier {
   /// Optional: ids of everything watched (movie imdb id, or `tt:season:ep`).
   final Box<String>? _watchedBox;
   final Set<String> _watched = {};
+
+  /// "Next up" per series (what to watch after the episode you finished).
+  final Box<String>? _nextUpBox;
+  final Map<String, NextUp> _nextUp = {};
 
   /// Called when the user adds/removes a favourite (Trakt watchlist sync).
   void Function(MetaItem item, bool added)? onFavouriteChanged;
@@ -53,6 +63,15 @@ class LibraryProvider extends ChangeNotifier {
 
     for (final key in _watchedBox?.keys ?? const <dynamic>[]) {
       _watched.add('$key');
+    }
+
+    for (final key in _nextUpBox?.keys ?? const <dynamic>[]) {
+      try {
+        final n = NextUp.fromJson(
+          Map<String, dynamic>.from(jsonDecode(_nextUpBox!.get(key)!) as Map),
+        );
+        _nextUp[n.meta.id] = n;
+      } catch (_) {}
     }
 
     for (final key in _progressBox.keys) {
@@ -152,12 +171,40 @@ class LibraryProvider extends ChangeNotifier {
   List<WatchProgress> get finishedProgress =>
       _progress.values.where((p) => p.finished).toList();
 
+  // ---- next up ------------------------------------------------------------
+
+  /// Series with a next episode waiting, newest first.
+  List<NextUp> get nextUp =>
+      _nextUp.values.toList()
+        ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+
+  NextUp? nextUpFor(String itemId) => _nextUp[itemId];
+
+  Future<void> setNextUp(NextUp n) async {
+    _nextUp[n.meta.id] = n;
+    await _nextUpBox?.put(n.meta.id, jsonEncode(n.toJson()));
+    notifyListeners();
+  }
+
+  Future<void> clearNextUp(String itemId) async {
+    if (_nextUp.remove(itemId) == null) return;
+    await _nextUpBox?.delete(itemId);
+    notifyListeners();
+  }
+
   Future<void> saveProgress(WatchProgress p) async {
     // Don't litter the list with accidental 10-second plays.
     if (p.positionMs < 5000 && !_progress.containsKey(p.videoId)) return;
     _progress[p.videoId] = p;
     await _progressBox.put(p.videoId, jsonEncode(p.toJson()));
-    if (p.finished) await markWatched([p.videoId]);
+    if (p.finished) {
+      await markWatched([p.videoId]);
+    } else if (_nextUp.containsKey(p.meta.id)) {
+      // Started watching something (the suggested episode, or any other):
+      // the "next up" prompt has done its job.
+      _nextUp.remove(p.meta.id);
+      await _nextUpBox?.delete(p.meta.id);
+    }
     notifyListeners();
   }
 
@@ -171,6 +218,8 @@ class LibraryProvider extends ChangeNotifier {
       _progress.remove(id);
     }
     await _progressBox.deleteAll(ids);
+    _nextUp.remove(itemId);
+    await _nextUpBox?.delete(itemId);
     notifyListeners();
   }
 }

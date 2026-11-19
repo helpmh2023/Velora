@@ -1,6 +1,6 @@
 import 'dart:ui' as ui;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// The Velora "V" mark. It breathes: gently scales and radiates a soft glow
 /// of its own colours. Pass [breath] (0..1) to sync it with something else

@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// Network image that fades in when it arrives and degrades to a flat tile on
 /// failure. [cacheWidth] keeps decoded bitmaps small for rows of posters.

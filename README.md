@@ -90,11 +90,15 @@ adapter and press **Apply**. Use "Check what peers see" to verify.
 Your data (library, settings, progress) is in
 `%APPDATA%\Velora\Velora\data`. Uninstalling keeps it on purpose.
 
+Downloaded video is cached in `%LOCALAPPDATA%\Velora\Velora\engine` (up to the
+cache size set in Settings), so watching or resuming a title again does not
+download it again. **Settings -> Streaming -> Clear cache** frees the space.
+
 ## Build from source
 
 You need:
 
-- **Flutter** 3.38 (stable) with Windows desktop enabled
+- **Flutter** 3.50 or newer (stable) with Windows desktop enabled. Older versions can be capped at about 30 fps on recent Windows 11 builds
 - **Visual Studio 2022** (or Build Tools) with *Desktop development with C++*
   **and** the *C++ ATL for latest v143 build tools (x86 & x64)* component
 - **Go** 1.27 or newer (for the torrent engine)

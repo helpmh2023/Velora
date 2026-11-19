@@ -28,6 +28,17 @@ class Episode {
     thumbnail: j['thumbnail'] as String?,
     released: DateTime.tryParse('${j['released'] ?? j['firstAired'] ?? ''}'),
   );
+
+  /// Same shape [Episode.fromJson] reads, for storing.
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'season': season,
+    'number': number,
+    'name': title,
+    'overview': overview,
+    'thumbnail': thumbnail,
+    'released': released?.toUtc().toIso8601String(),
+  };
 }
 
 class MetaItem {

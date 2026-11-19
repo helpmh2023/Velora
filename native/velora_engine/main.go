@@ -1,15 +1,18 @@
 // velora_engine: a tiny torrent-streaming server.
 //
 // Flutter starts this process, reads the port it prints, then plays
-//   http://127.0.0.1:<port>/stream/<infoHash>/<fileIdx>
+//
+//	http://127.0.0.1:<port>/stream/<infoHash>/<fileIdx>
+//
 // like any ordinary video URL. Pieces are fetched on demand (sequentially
 // around the playback position), so playback starts before the download ends.
 //
 // Endpoints (all GET, loopback only):
-//   /health                      -> {"ok":true}
-//   /stream/<hash>/<idx|auto>    -> the video file, Range requests supported
-//                                   optional query: tr=<tracker> (repeatable), dn=<name>
-//   /status/<hash>               -> peers, progress, file list
+//
+//	/health                      -> {"ok":true}
+//	/stream/<hash>/<idx|auto>    -> the video file, Range requests supported
+//	                                optional query: tr=<tracker> (repeatable), dn=<name>
+//	/status/<hash>               -> peers, progress, file list
 //
 // Lifetime: exits when stdin closes (i.e. when the parent app dies).
 package main
@@ -63,22 +66,28 @@ type server struct {
 
 func main() {
 	var (
-		dataDir   = flag.String("data-dir", filepath.Join(os.TempDir(), "velora-cache"), "cache directory")
-		maxCacheG = flag.Float64("max-cache-gb", 4, "cache size cap in GiB")
-		uploadK   = flag.Int("upload-kbps", 1, "upload limit in KiB/s (minimum 1)")
-		bindIP    = flag.String("bind-ip", "", "bind all peer/tracker traffic to this local address (e.g. a VPN adapter); refuse to run if it is missing")
-		noUpload  = flag.Bool("no-upload", false, "do not upload at all")
-		host      = flag.String("host", "127.0.0.1", "bind address (keep loopback unless you know why)")
-		port      = flag.Int("port", 0, "HTTP port (0 = pick a free one)")
+		dataDir    = flag.String("data-dir", filepath.Join(os.TempDir(), "velora-cache"), "cache directory")
+		maxCacheG  = flag.Float64("max-cache-gb", 4, "cache size cap in GiB")
+		uploadK    = flag.Int("upload-kbps", 1, "upload limit in KiB/s (minimum 1)")
+		bindIP     = flag.String("bind-ip", "", "bind all peer/tracker traffic to this local address (e.g. a VPN adapter); refuse to run if it is missing")
+		noUpload   = flag.Bool("no-upload", false, "do not upload at all")
+		freshCache = flag.Bool("fresh-cache", false, "delete the cache folder at start (default: keep it between runs)")
+		host       = flag.String("host", "127.0.0.1", "bind address (keep loopback unless you know why)")
+		port       = flag.Int("port", 0, "HTTP port (0 = pick a free one)")
 	)
 	flag.Parse()
 	log.SetFlags(log.Ltime)
 
-	// Fresh cache every launch: nothing from a previous session lingers.
-	_ = os.RemoveAll(*dataDir)
+	// By default the cache survives restarts, so a title you already
+	// downloaded (or part of it) is not downloaded again. --fresh-cache wipes
+	// it first; either way the folder is trimmed to the size cap.
+	if *freshCache {
+		_ = os.RemoveAll(*dataDir)
+	}
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		log.Fatalf("cache dir: %v", err)
 	}
+	trimCache(*dataDir, int64(*maxCacheG*(1<<30)))
 
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = *dataDir
@@ -171,8 +180,16 @@ func (s *server) addTorrent(ctx context.Context, hash string, trackers []string,
 		return nil, fmt.Errorf("bad info hash %q", hash)
 	}
 	spec := &torrent.TorrentSpec{InfoHash: ih, DisplayName: name}
+	// If we have seen this torrent before, its file list was saved: load it, so
+	// pieces already on disk can be served immediately, even with no peers.
+	if mi, err := metainfo.LoadFromFile(s.metaPath(ih)); err == nil {
+		spec = torrent.TorrentSpecFromMetaInfo(mi)
+		if name != "" {
+			spec.DisplayName = name
+		}
+	}
 	if len(trackers) > 0 {
-		spec.Trackers = [][]string{trackers}
+		spec.Trackers = append(spec.Trackers, trackers)
 	}
 	t, _, err := s.client.AddTorrentSpec(spec)
 	if err != nil {
@@ -180,6 +197,7 @@ func (s *server) addTorrent(ctx context.Context, hash string, trackers []string,
 	}
 	select {
 	case <-t.GotInfo():
+		s.saveMeta(t)
 		return t, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -396,4 +414,90 @@ func (s *server) handleMyIP(w http.ResponseWriter, r *http.Request) {
 		out["bindAddress"] = s.bound.String()
 	}
 	writeJSON(w, out)
+}
+
+// trimCache brings a cache folder from an earlier run back under [max] bytes by
+// deleting the least recently used torrent folders/files first. If anything is
+// deleted the piece-completion database (".torrent*") is removed too, so it can
+// never claim pieces are complete whose files are gone; it is rebuilt by
+// verifying whatever data remains.
+func trimCache(dir string, max int64) {
+	type entry struct {
+		path  string
+		size  int64
+		mtime time.Time
+	}
+	items, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var entries []entry
+	var total int64
+	for _, it := range items {
+		if strings.HasPrefix(it.Name(), ".") {
+			continue // the completion database; handled below
+		}
+		p := filepath.Join(dir, it.Name())
+		e := entry{path: p}
+		_ = filepath.Walk(p, func(_ string, info os.FileInfo, err error) error {
+			if err != nil || info == nil {
+				return nil
+			}
+			if !info.IsDir() {
+				e.size += info.Size()
+			}
+			if info.ModTime().After(e.mtime) {
+				e.mtime = info.ModTime()
+			}
+			return nil
+		})
+		total += e.size
+		entries = append(entries, e)
+	}
+	if total <= max {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].mtime.Before(entries[j].mtime) })
+	removed := false
+	for _, e := range entries {
+		if total <= max {
+			break
+		}
+		if os.RemoveAll(e.path) == nil {
+			total -= e.size
+			removed = true
+		}
+	}
+	if removed {
+		for _, it := range items {
+			if strings.HasPrefix(it.Name(), ".torrent") {
+				_ = os.RemoveAll(filepath.Join(dir, it.Name()))
+			}
+		}
+	}
+}
+
+// metaPath is where a torrent's file list (its .torrent metadata) is kept. The
+// folder starts with a dot, so the cache trimmer never deletes it; the files
+// are a few KB each.
+func (s *server) metaPath(ih metainfo.Hash) string {
+	return filepath.Join(s.dataDir, ".meta", ih.HexString()+".torrent")
+}
+
+// saveMeta remembers a torrent's metadata the first time we learn it.
+func (s *server) saveMeta(t *torrent.Torrent) {
+	path := s.metaPath(t.InfoHash())
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	mi := t.Metainfo()
+	_ = mi.Write(f)
 }

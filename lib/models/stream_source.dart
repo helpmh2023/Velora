@@ -24,6 +24,7 @@ class StreamSource {
     required this.languages,
     required this.trackers,
     this.filename,
+    this.bingeGroup,
   });
 
   final String infoHash;
@@ -45,6 +46,11 @@ class StreamSource {
   final List<String> trackers;
   final String? filename;
 
+  /// Torrentio's "binge group": releases of the same show from the same
+  /// source/quality/encode share one, so the next episode can be matched to
+  /// the one you were watching. Example: `torrentio|1080p|WEB-DL|x265|HDR`.
+  final String? bingeGroup;
+
   Map<String, dynamic> toJson() => {
     'infoHash': infoHash,
     'fileIdx': fileIdx,
@@ -58,6 +64,7 @@ class StreamSource {
     'languages': languages,
     'trackers': trackers,
     'filename': filename,
+    'bingeGroup': bingeGroup,
   };
 
   /// Inverse of [toJson] (not Torrentio's wire format).
@@ -77,6 +84,7 @@ class StreamSource {
     languages: '${j['languages'] ?? ''}',
     trackers: ((j['trackers'] as List?) ?? const []).map((e) => '$e').toList(),
     filename: j['filename'] as String?,
+    bingeGroup: j['bingeGroup'] as String?,
   );
 
   static const _defaultTrackers = [
@@ -174,6 +182,7 @@ class StreamSource {
       languages: langs,
       trackers: trackers.isEmpty ? _defaultTrackers : trackers,
       filename: hints is Map ? hints['filename'] as String? : null,
+      bingeGroup: hints is Map ? hints['bingeGroup'] as String? : null,
     );
   }
 }

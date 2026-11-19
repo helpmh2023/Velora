@@ -1,3 +1,7 @@
+// Dev-only tool: the scripted run deliberately reuses one navigator context
+// across awaits.
+// ignore_for_file: use_build_context_synchronously
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -5,11 +9,13 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/home_provider.dart';
+import 'bench_pacing.dart';
+import 'bench_playback.dart';
 import '../screens/home/home_screen.dart';
 import 'glass.dart';
 
@@ -84,6 +90,24 @@ Future<void> _runBench(String variant, GlobalKey<NavigatorState> navKey) async {
   await home.ready.timeout(const Duration(seconds: 20), onTimeout: () {});
   await Future<void>.delayed(const Duration(milliseconds: 1500));
 
+  // `pacing<N>`: move the window to display N and measure frame pacing there.
+  if (variant.startsWith('pacing')) {
+    final extra = await pacingProbe(
+      int.tryParse(variant.substring(6)) ?? 0,
+      () => now(),
+      phase,
+    );
+    await _finish(variant, view, frames, phases, extra);
+    return;
+  }
+
+  Map<String, Object?>? playback;
+  if (variant == 'playback') {
+    playback = await playbackBench(ctx, navKey, phase);
+    await _finish(variant, view, frames, phases, playback);
+    return;
+  }
+
   await phase(
     'home_idle',
     () => Future<void>.delayed(const Duration(seconds: 4)),
@@ -112,6 +136,16 @@ Future<void> _runBench(String variant, GlobalKey<NavigatorState> navKey) async {
     () => Future<void>.delayed(const Duration(seconds: 3)),
   );
 
+  await _finish(variant, view, frames, phases, null);
+}
+
+Future<void> _finish(
+  String variant,
+  FlutterView view,
+  List<FrameTiming> frames,
+  List<_Phase> phases,
+  Map<String, Object?>? playback,
+) async {
   // Let the last batch of timings arrive.
   await Future<void>.delayed(const Duration(seconds: 2));
 
@@ -122,6 +156,7 @@ Future<void> _runBench(String variant, GlobalKey<NavigatorState> navKey) async {
     'physicalSize':
         '${view.physicalSize.width.round()}x${view.physicalSize.height.round()}',
     'framesTotal': frames.length,
+    'playback': ?playback,
     'phases': {for (final p in phases) p.name: p.summarize(frames)},
   };
   final path =

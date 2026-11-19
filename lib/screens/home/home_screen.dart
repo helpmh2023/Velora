@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/smooth_scroll.dart';
@@ -82,13 +82,15 @@ class _HomeScreenState extends State<HomeScreen> {
         void open(MetaItem m) => HomeScreen.openDetails(context, m);
         final lib = context.watch<LibraryProvider>();
         final cont = lib.continueWatching;
+        final next = lib.nextUp;
         final favs = lib.favourites;
         final shelves = <Widget>[
           Padding(
             padding: const EdgeInsets.only(top: 8, bottom: 8),
             child: HeroBanner(items: home.hero, onOpen: open),
           ),
-          if (cont.isNotEmpty) ContinueRow(items: cont, onOpenDetails: open),
+          if (cont.isNotEmpty || next.isNotEmpty)
+            ContinueRow(items: cont, nextUp: next, onOpenDetails: open),
           if (favs.isNotEmpty)
             MediaRow(title: 'My List', items: favs, onOpen: open),
           for (final row in home.rows)

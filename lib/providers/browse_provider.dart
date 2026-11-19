@@ -162,11 +162,9 @@ class BrowseProvider extends ChangeNotifier {
 }
 
 class MoviesBrowse extends BrowseProvider {
-  MoviesBrowse(CinemetaService service, {DateTime? now})
-    : super('movie', service, now: now);
+  MoviesBrowse(CinemetaService service, {super.now}) : super('movie', service);
 }
 
 class SeriesBrowse extends BrowseProvider {
-  SeriesBrowse(CinemetaService service, {DateTime? now})
-    : super('series', service, now: now);
+  SeriesBrowse(CinemetaService service, {super.now}) : super('series', service);
 }

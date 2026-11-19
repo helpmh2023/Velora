@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
@@ -46,6 +46,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.dispose();
   }
 
+  static String _fmtBytes(int b) {
+    const gb = 1 << 30, mb = 1 << 20;
+    return b >= gb
+        ? '${(b / gb).toStringAsFixed(2)} GB'
+        : '${(b / mb).toStringAsFixed(0)} MB';
+  }
+
   Future<void> _refreshCache() async {
     final n = await context.read<EngineService>().cacheBytes();
     if (mounted) setState(() => _cacheBytes = n);
@@ -71,7 +78,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _urlCtl.text = settings.remoteUrl ?? '';
   }
 
-  Future<void> _apply() async {
+  Future<void> _apply({bool clear = false}) async {
     final s = context.read<SettingsProvider>();
     setState(() => _applying = true);
     try {
@@ -79,8 +86,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         maxCacheGb: s.maxCacheGb,
         uploadKbps: s.uploadKbps,
         noUpload: !s.allowUpload,
+        keepCache: s.keepCache,
         bindIp: s.bindIp,
         remoteBaseUrl: s.remoteUrl,
+        clearCache: clear,
       );
     } catch (_) {
       // The engine card shows the error.
@@ -98,6 +107,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       maxCacheGb: s.maxCacheGb,
       uploadKbps: s.uploadKbps,
       noUpload: !s.allowUpload,
+      keepCache: s.keepCache,
       bindIp: s.bindIp,
       remoteBaseUrl: s.remoteUrl,
     );
@@ -121,6 +131,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               title: 'Streaming',
               children: [
                 _Row(
+                  title: 'Play next episode automatically',
+                  subtitle:
+                      'Near the end of an episode, an "Up next" card appears and starts the '
+                      'next episode after 10 seconds, picking a source that matches the one '
+                      'you were watching. You can always press Cancel. Turn off to be asked '
+                      'instead.',
+                  trailing: Switch(
+                    value: s.autoplayNext,
+                    onChanged: (v) => s.autoplayNext = v,
+                  ),
+                ),
+                _Row(
                   title: 'Cache size',
                   subtitle:
                       'Most disk space downloaded video may use. Oldest titles are removed first.',
@@ -134,6 +156,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     max: 32,
                     divisions: 31,
                     onChanged: (v) => s.maxCacheGb = v.roundToDouble(),
+                  ),
+                ),
+                _Row(
+                  title: 'Keep downloads between sessions',
+                  subtitle:
+                      'Video you already downloaded (even partly) stays on disk, so watching it '
+                      'again, or resuming, does not download it again, and cached titles even '
+                      'start without internet. Turn off to wipe it each time Velora starts.',
+                  trailing: Switch(
+                    value: s.keepCache,
+                    onChanged: (v) => s.keepCache = v,
                   ),
                 ),
                 _Row(
@@ -298,7 +331,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const Expanded(
                       child: Text(
                         'Engine settings changed. Apply them to restart the engine '
-                        '(this clears the cache and stops anything playing).',
+                        '(this stops anything playing; your downloaded cache is kept).',
                         style: TextStyle(color: Colors.white70),
                       ),
                     ),
@@ -315,9 +348,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Align(
                 alignment: Alignment.centerLeft,
                 child: GlassButton(
-                  label: _applying ? 'Clearing...' : 'Clear cache',
+                  label: _applying
+                      ? 'Clearing...'
+                      : 'Clear cache${_cacheBytes == null ? '' : '  (${_fmtBytes(_cacheBytes!)})'}',
                   icon: Icons.delete_sweep_rounded,
-                  onTap: _applying ? () {} : _apply,
+                  onTap: _applying ? () {} : () => _apply(clear: true),
                 ),
               ),
           ],

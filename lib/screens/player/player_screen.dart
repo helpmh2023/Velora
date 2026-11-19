@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -9,15 +9,22 @@ import 'package:window_manager/window_manager.dart';
 
 import '../../core/platform.dart';
 import '../../models/meta_item.dart';
+import '../../models/next_up.dart';
 import '../../models/stream_source.dart';
 import '../../models/watch_progress.dart';
 import '../../providers/library_provider.dart';
+import '../../providers/settings_provider.dart';
 import '../../providers/trakt_provider.dart';
 import '../../services/engine_service.dart';
+import '../../services/next_episode.dart';
 import '../../widgets/aurora_background.dart' show auroraHolds;
 import '../../widgets/glass_button.dart';
 import '../../widgets/glass_panel.dart';
 import '../../widgets/title_bar.dart';
+import 'open_player.dart';
+import 'play_next.dart';
+import 'player_stats.dart';
+import 'up_next_card.dart';
 import 'seek_bar.dart';
 
 /// Plays one torrent source through the local engine with glass controls.
@@ -33,6 +40,7 @@ class PlayerScreen extends StatefulWidget {
     this.episode,
     this.episodeTitle,
     this.startAt,
+    this.startFullscreen = false,
   });
 
   final StreamSource source;
@@ -49,6 +57,9 @@ class PlayerScreen extends StatefulWidget {
   /// Resume point; null starts from the beginning.
   final Duration? startAt;
 
+  /// Open already fullscreen (carried over when moving to the next episode).
+  final bool startFullscreen;
+
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -57,7 +68,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   late final Player _player = Player(
     configuration: const PlayerConfiguration(
       title: 'Velora',
-      bufferSize: 128 * 1024 * 1024,
+      bufferSize: 256 * 1024 * 1024,
     ),
   );
   late final VideoController _video = VideoController(_player);
@@ -69,6 +80,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _hideTimer;
   Timer? _statusTimer;
   Timer? _saveTimer;
+  Timer? _statsTimer;
+  bool _showStats = false;
+  PlayerStats? _stats;
+
+  // --- next episode ---
+  late final NextEpisodeService _nextSvc;
+  late final EngineService _engine;
+  Episode? _nextEp;
+  StreamSource? _nextSource;
+  bool _nextLookedUp = false;
+  bool _upNextVisible = false;
+  bool _upNextDismissed = false;
+  bool _handoff = false; // moving on to the next episode
+  bool _stopSent = false; // Trakt "stop" already sent for this episode
+  int _countdown = 10;
+  Timer? _countdownTimer;
 
   bool _controlsVisible = true;
   bool _fullscreen = false;
@@ -91,6 +118,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     auroraHolds.value++; // video is opaque: stop animating behind it
     _library = context.read<LibraryProvider>();
     _trakt = context.read<TraktProvider>();
+    _nextSvc = context.read<NextEpisodeService>();
+    _engine = context.read<EngineService>();
+    _fullscreen = widget.startFullscreen;
+    _statsTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _pollStats(),
+    );
     _saveTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => _saveProgress(),
@@ -107,7 +141,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _poke();
       }),
       _player.stream.buffering.listen((v) => setState(() => _buffering = v)),
-      _player.stream.position.listen((v) => setState(() => _position = v)),
+      _player.stream.position.listen((v) {
+        setState(() => _position = v);
+        _onPosition(v);
+      }),
+      _player.stream.completed.listen(_onCompleted),
       _player.stream.duration.listen(
         (v) => setState(() {
           _duration = v;
@@ -143,6 +181,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final native = _player.platform;
       if (native is NativePlayer) {
         await native.setProperty('network-timeout', '120');
+        // Torrent sources arrive in bursts. If data runs short, stop and refill
+        // a decent amount before resuming: one clear pause instead of many tiny
+        // stop-start stutters (mpv's default resumes after just 1 second).
+        await native.setProperty('cache-pause-wait', '6');
         await native.setProperty(
           'stream-lavf-o',
           'reconnect=1,reconnect_streamed=1,reconnect_delay_max=5',
@@ -160,6 +202,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
+  }
+
+  /// Read mpv's playback stats (overlay with `I`, or the benchmark).
+  Future<void> _pollStats() async {
+    if (!_showStats && !collectPlayerStats) return;
+    final native = _player.platform;
+    if (native is! NativePlayer || !_started) return;
+    final s = await PlayerStats.read(native);
+    if (!mounted) return;
+    latestPlayerStats.value = s;
+    if (_showStats) setState(() => _stats = s);
   }
 
   /// Tell Trakt (if connected): start / pause / stop. Never blocks playback.
@@ -195,18 +248,232 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     auroraHolds.value--;
-    _scrobble('stop'); // >=80% watched also lands in Trakt history
+    if (!_stopSent) {
+      _scrobble('stop'); // >=80% watched also lands in Trakt history
+    }
     _saveProgress();
+    _countdownTimer?.cancel();
+    if (!_handoff) unawaited(_recordNextUp());
     _saveTimer?.cancel();
+    _statsTimer?.cancel();
+    latestPlayerStats.value = null;
     _hideTimer?.cancel();
     _statusTimer?.cancel();
     for (final s in _subs) {
       s.cancel();
     }
-    if (_fullscreen && isDesktop) windowManager.setFullScreen(false);
+    // Staying fullscreen when handing over to the next episode.
+    if (_fullscreen && isDesktop && !_handoff) {
+      windowManager.setFullScreen(false);
+    }
     _focus.dispose();
     _player.dispose();
     super.dispose();
+  }
+
+  // ---- next episode -------------------------------------------------------
+
+  bool get _isSeries =>
+      widget.meta.isSeries && widget.season != null && widget.episode != null;
+
+  bool get _autoplay => context.read<SettingsProvider>().autoplayNext;
+
+  /// Called on every position update.
+  void _onPosition(Duration p) {
+    if (!_isSeries || _duration <= Duration.zero) return;
+    final frac = p.inMilliseconds / _duration.inMilliseconds;
+
+    // Look up what is next once we are well into the episode, so it is ready.
+    if (!_nextLookedUp && frac >= 0.55) {
+      _nextLookedUp = true;
+      unawaited(_prepareNext());
+    }
+
+    // Credits: the last ~35 seconds (or the last 3%) of a normal episode.
+    final remaining = _duration - p;
+    final inCredits =
+        _duration > const Duration(minutes: 3) &&
+        (remaining <= const Duration(seconds: 35) || frac >= 0.97);
+    if (inCredits && _nextEp != null && !_upNextDismissed && !_handoff) {
+      if (!_upNextVisible) _showUpNext();
+    } else if (_upNextVisible && !inCredits && !_handoff) {
+      _hideUpNext(); // the user skipped back
+    }
+  }
+
+  /// Finds the next episode and a matching source, and warms the engine up.
+  Future<void> _prepareNext() async {
+    try {
+      final ep = await _nextSvc.nextEpisode(
+        widget.meta,
+        widget.season!,
+        widget.episode!,
+      );
+      if (!mounted) return;
+      setState(() => _nextEp = ep);
+      if (ep == null) return; // last episode of the series, or not aired yet
+      final src = await _nextSvc.sourceFor(ep, widget.source);
+      if (!mounted) return;
+      setState(() => _nextSource = src);
+      if (src != null) {
+        unawaited(
+          _engine.prefetch(
+            infoHash: src.infoHash,
+            fileIdx: src.fileIdx,
+            trackers: src.trackers,
+            name: src.release,
+          ),
+        );
+      }
+    } catch (_) {
+      // No suggestion; the card falls back to the source picker.
+    }
+  }
+
+  void _showUpNext() {
+    setState(() {
+      _upNextVisible = true;
+      _countdown = 10;
+    });
+    _countdownTimer?.cancel();
+    if (_autoplay) {
+      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        if (!_playing) return; // paused: wait
+        if (_countdown <= 1) {
+          t.cancel();
+          _playNext();
+        } else {
+          setState(() => _countdown--);
+        }
+      });
+    }
+  }
+
+  void _hideUpNext() {
+    _countdownTimer?.cancel();
+    if (mounted) setState(() => _upNextVisible = false);
+  }
+
+  void _dismissUpNext() {
+    _upNextDismissed = true;
+    _hideUpNext();
+  }
+
+  /// The player reached the end of the file.
+  void _onCompleted(bool done) {
+    if (!done || !_isSeries || _handoff || _duration <= Duration.zero) return;
+    // A stalled stream can report "end" early; only trust it near the end.
+    if (_duration - _position > const Duration(seconds: 90)) return;
+    if (_nextEp == null) return;
+    if (!_upNextDismissed && _autoplay) {
+      _playNext();
+    } else if (mounted) {
+      setState(() => _upNextVisible = true);
+    }
+  }
+
+  /// Switch to the next episode now.
+  Future<void> _playNext() async {
+    final ep = _nextEp;
+    if (ep == null || _handoff || !mounted) return;
+    _handoff = true;
+    _countdownTimer?.cancel();
+
+    // Moving on counts as having watched this one.
+    _player.pause();
+    _library.markWatched([widget.videoId]);
+    _saveProgress();
+    _scrobble('stop');
+    _stopSent = true;
+
+    final keepFullscreen = _fullscreen;
+    final src = _nextSource;
+    final label = 'S${ep.season} E${ep.number}  -  ${ep.title}';
+    if (src != null) {
+      Navigator.of(context).pushReplacement(
+        playerRoute(
+          source: src,
+          meta: widget.meta,
+          videoId: ep.id,
+          subtitle: label,
+          season: ep.season,
+          episode: ep.number,
+          episodeTitle: ep.title,
+          fullscreen: keepFullscreen,
+        ),
+      );
+      return;
+    }
+
+    // No matching source was found automatically: let the user pick.
+    final opened = await playEpisodeAuto(
+      context,
+      meta: widget.meta,
+      next: ep,
+      reference: widget.source,
+      replace: true,
+      fullscreen: keepFullscreen,
+    );
+    if (!opened && mounted) {
+      // They backed out of the picker: stay here, quietly.
+      _handoff = false;
+      _stopSent = false;
+      _upNextDismissed = true;
+      setState(() => _upNextVisible = false);
+    }
+  }
+
+  /// Leaving an episode that is (nearly) finished: remember what comes next so
+  /// Home, the Library and the title page can offer it.
+  Future<void> _recordNextUp() async {
+    if (!_isSeries || _duration <= Duration.zero) return;
+    final finished =
+        _position.inMilliseconds / _duration.inMilliseconds >= 0.92 ||
+        _duration - _position < const Duration(seconds: 90);
+    if (!finished) return;
+    try {
+      final ep =
+          _nextEp ??
+          await _nextSvc.nextEpisode(
+            widget.meta,
+            widget.season!,
+            widget.episode!,
+          );
+      if (ep == null) {
+        await _library.clearNextUp(widget.meta.id); // series finished
+        return;
+      }
+      if (_library.isWatched(ep.id)) return; // already seen: nothing to suggest
+      await _library.setNextUp(
+        NextUp(
+          meta: widget.meta,
+          episode: ep,
+          reference: widget.source,
+          updatedAt: DateTime.now(),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Widget _upNextOverlay() {
+    final ep = _nextEp;
+    if (!_upNextVisible || ep == null) return const SizedBox.shrink();
+    return Positioned(
+      right: 28,
+      bottom: 136, // above the control bar
+      child: UpNextCard(
+        episode: ep,
+        seriesName: widget.meta.name,
+        sourceReady: _nextSource != null,
+        countdown: _autoplay ? _countdown : null,
+        onPlay: _playNext,
+        onCancel: _dismissUpNext,
+      ),
+    );
   }
 
   // ---- controls -----------------------------------------------------------
@@ -283,6 +550,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
         const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
             _setVolume(_volume - 5),
         const SingleActivator(LogicalKeyboardKey.keyM): _toggleMute,
+        const SingleActivator(LogicalKeyboardKey.keyI): () {
+          setState(() => _showStats = !_showStats);
+          if (_showStats) _pollStats();
+        },
         const SingleActivator(LogicalKeyboardKey.keyF): _toggleFullscreen,
         const SingleActivator(LogicalKeyboardKey.f11): _toggleFullscreen,
         const SingleActivator(LogicalKeyboardKey.escape): _exit,
@@ -325,7 +596,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     onRetry: _open,
                     onBack: _exit,
                   ),
+                if (_showStats && _stats != null)
+                  Positioned(
+                    left: 16,
+                    top: 70,
+                    child: IgnorePointer(child: _StatsOverlay(_stats!)),
+                  ),
                 _controlsLayer(),
+                _upNextOverlay(),
               ],
             ),
           ),
@@ -746,4 +1024,39 @@ class _ErrorOverlay extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _StatsOverlay extends StatelessWidget {
+  const _StatsOverlay(this.stats);
+
+  final PlayerStats stats;
+
+  @override
+  Widget build(BuildContext context) {
+    final bad =
+        stats.pausedForCache ||
+        stats.decoderDrops > 0 ||
+        stats.voDrops > 0 ||
+        (stats.hwdec == null || stats.hwdec == 'no');
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: (bad ? const Color(0xFFFFB74D) : const Color(0xFF69F0AE))
+              .withValues(alpha: 0.6),
+        ),
+      ),
+      child: Text(
+        stats.describe().join('\n'),
+        style: const TextStyle(
+          fontFamily: 'Consolas',
+          fontSize: 12.5,
+          height: 1.4,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
 }

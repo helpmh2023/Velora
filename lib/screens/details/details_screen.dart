@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
@@ -14,7 +14,9 @@ import '../../widgets/glass_card.dart';
 import '../../widgets/glass_panel.dart';
 import '../../widgets/net_image.dart';
 import '../../widgets/title_bar.dart';
+import '../../models/next_up.dart';
 import '../player/open_player.dart';
+import '../player/play_next.dart';
 import 'stream_picker.dart';
 
 /// Title page: backdrop, poster, facts, and (for series) season + episodes.
@@ -140,6 +142,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
     final item = _item;
     final lib = context.watch<LibraryProvider>();
     final resume = lib.resumeFor(item.id);
+    // After finishing an episode: what to watch next (only when not mid-episode).
+    final NextUp? nextUp = resume == null ? lib.nextUpFor(item.id) : null;
     final wide = MediaQuery.sizeOf(context).width >= 820;
 
     return CallbackShortcuts(
@@ -221,19 +225,31 @@ class _DetailsScreenState extends State<DetailsScreen> {
                                       ? 'Loading episodes...'
                                       : 'Play S${_firstEpisode!.season} E${_firstEpisode!.number}')
                                 : 'Watch now',
-                            onPlay: item.isSeries
-                                ? (_firstEpisode == null
-                                      ? null
-                                      : () => _playEpisode(_firstEpisode!))
-                                : _playMovie,
-                            resumeLabel: resume == null
-                                ? null
+                            onPlay: nextUp != null
+                                ? () => _playEpisode(nextUp.episode)
                                 : (item.isSeries
+                                      ? (_firstEpisode == null
+                                            ? null
+                                            : () =>
+                                                  _playEpisode(_firstEpisode!))
+                                      : _playMovie),
+                            resumeLabel: resume != null
+                                ? (item.isSeries
                                       ? 'Resume S${resume.season} E${resume.episode}  ${_fmt(resume.position)}'
-                                      : 'Resume  ${_fmt(resume.position)}'),
-                            onResume: resume == null
-                                ? null
-                                : () => _resume(resume),
+                                      : 'Resume  ${_fmt(resume.position)}')
+                                : (nextUp != null
+                                      ? 'Play next  S${nextUp.episode.season} E${nextUp.episode.number}'
+                                      : null),
+                            onResume: resume != null
+                                ? () => _resume(resume)
+                                : (nextUp != null
+                                      ? () => playEpisodeAuto(
+                                          context,
+                                          meta: _item,
+                                          next: nextUp.episode,
+                                          reference: nextUp.reference,
+                                        )
+                                      : null),
                             isFavourite: lib.isFavourite(item.id),
                             onToggleFavourite: () => lib.toggleFavourite(item),
                           ),

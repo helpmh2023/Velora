@@ -68,6 +68,7 @@ class EngineService extends ChangeNotifier {
     this.maxCacheGb = 4,
     this.uploadKbps = 1,
     this.noUpload = false,
+    this.keepCache = true,
     this.bindIp,
     this.remoteBaseUrl,
     this.binaryPath,
@@ -78,6 +79,10 @@ class EngineService extends ChangeNotifier {
   double maxCacheGb;
   int uploadKbps;
   bool noUpload;
+
+  /// Keep downloaded data between sessions (default), or wipe it at each start.
+  bool keepCache;
+  bool _clearNext = false;
 
   /// Local address (a VPN adapter) all torrent traffic is bound to. If that
   /// address disappears the engine refuses to run instead of leaking.
@@ -137,9 +142,11 @@ class EngineService extends ChangeNotifier {
         '--upload-kbps',
         '$uploadKbps',
         if (noUpload) '--no-upload',
+        if (!keepCache || _clearNext) '--fresh-cache',
         if (bindIp != null) ...['--bind-ip', bindIp!],
       ]);
       _process = process;
+      _clearNext = false; // a one-off wipe has been handed to the engine
 
       final ready = Completer<int>();
       String? engineError; // a reason the engine printed before exiting
@@ -271,30 +278,36 @@ class EngineService extends ChangeNotifier {
     required double maxCacheGb,
     required int uploadKbps,
     required bool noUpload,
+    required bool keepCache,
     required String? bindIp,
     required String? remoteBaseUrl,
   }) =>
       this.maxCacheGb == maxCacheGb &&
       this.uploadKbps == uploadKbps &&
       this.noUpload == noUpload &&
+      this.keepCache == keepCache &&
       this.bindIp == bindIp &&
       this.remoteBaseUrl == remoteBaseUrl;
 
-  /// Stop, adopt new settings, start again. Also wipes the local cache,
-  /// because the engine clears it on every launch.
+  /// Stop, adopt new settings, start again. The downloaded cache is kept
+  /// unless [clearCache] is true (or "keep downloads" is off).
   Future<void> restartWith({
     required double maxCacheGb,
     required int uploadKbps,
     required bool noUpload,
+    required bool keepCache,
     required String? bindIp,
     required String? remoteBaseUrl,
+    bool clearCache = false,
   }) async {
     await stop();
     this.maxCacheGb = maxCacheGb;
     this.uploadKbps = uploadKbps;
     this.noUpload = noUpload;
+    this.keepCache = keepCache;
     this.bindIp = bindIp;
     this.remoteBaseUrl = remoteBaseUrl;
+    _clearNext = clearCache;
     await start();
   }
 
@@ -381,17 +394,67 @@ class EngineService extends ChangeNotifier {
     }
   }
 
+  /// Warm a source up in the background: the engine joins the swarm, learns
+  /// the file list and fetches the first couple of MB, so playing it later
+  /// (e.g. the next episode) starts quickly. Never throws.
+  Future<void> prefetch({
+    required String infoHash,
+    int? fileIdx,
+    List<String> trackers = const [],
+    String? name,
+  }) async {
+    final base = _baseUrl;
+    if (base == null) return;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+    try {
+      final url = streamUrl(
+        infoHash: infoHash,
+        fileIdx: fileIdx,
+        trackers: trackers,
+        name: name,
+      );
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set('Range', 'bytes=0-2097151'); // first 2 MiB
+      final res = await req.close().timeout(const Duration(seconds: 90));
+      var got = 0;
+      await for (final chunk in res) {
+        got += chunk.length;
+        if (got >= 2097152) break;
+      }
+    } catch (_) {
+      // Best effort only.
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Stops the engine politely: closing its stdin makes it flush and exit,
+  /// so cached pieces are known complete on the next start (a hard kill works
+  /// too but costs a one-off re-check of the cached files).
   Future<void> stop() async {
-    _process?.kill();
+    final proc = _process;
     _process = null;
     _baseUrl = null;
     _starting = null;
+    if (proc != null) {
+      try {
+        await proc.stdin.close();
+      } catch (_) {}
+      final exited = await proc.exitCode
+          .then((_) => true)
+          .timeout(const Duration(seconds: 4), onTimeout: () => false);
+      if (!exited) proc.kill();
+    }
     if (_state != EngineState.stopped) _set(EngineState.stopped);
   }
 
   @override
   void dispose() {
-    _process?.kill();
+    // Closing stdin lets the engine exit cleanly (it also does so by itself
+    // if this app dies).
+    try {
+      _process?.stdin.close();
+    } catch (_) {}
     _process = null;
     super.dispose();
   }

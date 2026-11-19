@@ -1,6 +1,6 @@
 ﻿import 'dart:io' show Platform;
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
@@ -18,6 +18,7 @@ import 'providers/settings_provider.dart';
 import 'providers/trakt_provider.dart';
 import 'services/cinemeta_service.dart';
 import 'services/engine_service.dart';
+import 'services/next_episode.dart';
 import 'services/token_store.dart';
 import 'services/trakt_service.dart';
 
@@ -50,11 +51,14 @@ Future<void> main() async {
     await Hive.openBox<String>('favourites'),
     await Hive.openBox<String>('progress'),
     await Hive.openBox<String>('watched'),
+    await Hive.openBox<String>('nextup'),
   );
 
   // Torrent engine: warm it up at launch so the first Play is fast.
   // Windows only for now; Android/iOS get an in-process engine later.
   final engine = EngineService(
+    cacheDir: (await engineCacheDir()).path,
+    keepCache: settings.keepCache,
     maxCacheGb: settings.maxCacheGb,
     uploadKbps: settings.uploadKbps,
     noUpload: !settings.allowUpload,
@@ -83,6 +87,8 @@ Future<void> main() async {
         ChangeNotifierProvider.value(value: settings),
         ChangeNotifierProvider.value(value: library),
         ChangeNotifierProvider.value(value: trakt),
+        // Finds the next episode + a matching source (shared cache of show data).
+        Provider(create: (_) => NextEpisodeService()),
         // One catalog browser per tab; they keep their place across tab switches.
         ChangeNotifierProvider(create: (_) => MoviesBrowse(CinemetaService())),
         ChangeNotifierProvider(create: (_) => SeriesBrowse(CinemetaService())),

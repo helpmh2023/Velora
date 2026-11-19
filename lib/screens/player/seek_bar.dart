@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// Thin progress bar with a buffered layer; click or drag to seek.
 class SeekBar extends StatefulWidget {
