@@ -1,4 +1,6 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding;
 import 'package:media_kit/media_kit.dart';
 
 /// A snapshot of how playback is going, read from mpv. Shown by the `I`
@@ -167,3 +169,97 @@ final ValueNotifier<PlayerStats?> latestPlayerStats = ValueNotifier(null);
 
 /// Set by the benchmark so the player collects stats even without the overlay.
 bool collectPlayerStats = false;
+
+/// Measures how fast the app itself is drawing (separate from the video's own
+/// frame rate): a laggy-looking video with perfect mpv stats means the screen
+/// is not being updated in time. Shown as a line in the `I` overlay.
+class UiFrameMeter {
+  UiFrameMeter._();
+  static final instance = UiFrameMeter._();
+
+  int _frames = 0;
+  double _worstBuild = 0;
+  double _worstRaster = 0;
+  DateTime _since = DateTime.now();
+  bool _on = false;
+
+  void start() {
+    if (_on) return;
+    _on = true;
+    _reset();
+    SchedulerBinding.instance.addTimingsCallback(_onTimings);
+  }
+
+  void stop() {
+    if (!_on) return;
+    _on = false;
+    SchedulerBinding.instance.removeTimingsCallback(_onTimings);
+  }
+
+  void _reset() {
+    _frames = 0;
+    _worstBuild = 0;
+    _worstRaster = 0;
+    _since = DateTime.now();
+  }
+
+  void _onTimings(List<FrameTiming> timings) {
+    for (final t in timings) {
+      _frames++;
+      final b = t.buildDuration.inMicroseconds / 1000;
+      final r = t.rasterDuration.inMicroseconds / 1000;
+      if (b > _worstBuild) _worstBuild = b;
+      if (r > _worstRaster) _worstRaster = r;
+    }
+  }
+
+  /// Frame rate the app drew during the last measured second.
+  double lastFps = 0;
+
+  /// The display's refresh rate in Hz (0 if unknown).
+  static double get displayHz {
+    try {
+      final views = WidgetsBinding.instance.platformDispatcher.views;
+      return views.isEmpty ? 0 : views.first.display.refreshRate;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// One overlay line covering the time since the last call.
+  String line() {
+    final secs = DateTime.now().difference(_since).inMilliseconds / 1000;
+    final fps = secs > 0 ? _frames / secs : 0.0;
+    lastFps = fps;
+    final hz = displayHz;
+    final text =
+        'Screen  app draws ${fps.toStringAsFixed(0)} fps'
+        '${hz > 0 ? ' (display ${hz.toStringAsFixed(0)} Hz)' : ''}   '
+        'slowest frame: build ${_worstBuild.toStringAsFixed(0)} ms, '
+        'raster ${_worstRaster.toStringAsFixed(0)} ms';
+    _reset();
+    return text;
+  }
+
+  /// Compares what is drawn on screen with the video's own frame rate. Null
+  /// while there is nothing to compare yet. [problem] is true when the screen
+  /// shows noticeably fewer frames than the video has (what you see as lag).
+  ({String text, bool problem})? verdict(double? videoFps) {
+    if (videoFps == null || videoFps <= 0 || lastFps <= 0) return null;
+    if (lastFps < videoFps * 0.9) {
+      return (
+        text:
+            'CHECK   PROBLEM: screen shows ${lastFps.toStringAsFixed(0)} fps but '
+            'the video has ${videoFps.toStringAsFixed(0)} fps: frames are being lost '
+            'in drawing (not decoding)',
+        problem: true,
+      );
+    }
+    return (
+      text:
+          'CHECK   OK: screen (${lastFps.toStringAsFixed(0)} fps) keeps up with '
+          'the ${videoFps.toStringAsFixed(0)} fps video',
+      problem: false,
+    );
+  }
+}

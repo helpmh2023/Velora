@@ -15,7 +15,7 @@ void main() {
 
     var box = await Hive.openBox<dynamic>('settings');
     var s = SettingsProvider(box);
-    expect(s.maxCacheGb, 4);
+    expect(s.maxCacheGb, 8);
     expect(s.uploadKbps, 1); // minimum upload by default
     expect(s.allowUpload, isTrue);
     expect(s.remoteUrl, isNull);

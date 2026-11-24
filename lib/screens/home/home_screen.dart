@@ -89,8 +89,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.only(top: 8, bottom: 8),
             child: HeroBanner(items: home.hero, onOpen: open),
           ),
-          if (cont.isNotEmpty || next.isNotEmpty)
-            ContinueRow(items: cont, nextUp: next, onOpenDetails: open),
+          ContinueRow(items: cont, nextUp: next, onOpenDetails: open),
           if (favs.isNotEmpty)
             MediaRow(title: 'My List', items: favs, onOpen: open),
           for (final row in home.rows)

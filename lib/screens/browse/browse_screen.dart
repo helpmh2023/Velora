@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../core/smooth_scroll.dart';
 import '../../models/meta_item.dart';
 import '../../providers/browse_provider.dart';
+import '../../widgets/prebuffer_status.dart';
 import '../../widgets/glass_button.dart';
 import '../../widgets/poster_card.dart';
 import '../home/home_screen.dart';
@@ -108,9 +109,21 @@ class _Header extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 30,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              PrebufferStatusButton(
+                preferType: title == 'Series' ? 'series' : 'movie',
+              ),
+            ],
           ),
           const SizedBox(height: 16),
           Wrap(

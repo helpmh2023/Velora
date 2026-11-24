@@ -62,6 +62,8 @@ type server struct {
 
 	mu   sync.Mutex
 	used map[metainfo.Hash]*usage
+
+	jobs jobs // pre-buffered files (see prebuffer.go)
 }
 
 func main() {
@@ -85,7 +87,7 @@ func main() {
 		_ = os.RemoveAll(*dataDir)
 	}
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
-		log.Fatalf("cache dir: %v", err)
+		fatal("cannot use the cache folder %s: %v (is the disk full?)", *dataDir, err)
 	}
 	trimCache(*dataDir, int64(*maxCacheG*(1<<30)))
 
@@ -129,7 +131,7 @@ func main() {
 
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("torrent client: %v", err)
+		fatal("cannot start the torrent client: %v (is the disk full, or a firewall blocking it?)", err)
 	}
 	defer client.Close()
 
@@ -139,6 +141,7 @@ func main() {
 		dataDir:  *dataDir,
 		maxCache: int64(*maxCacheG * (1 << 30)),
 		used:     map[metainfo.Hash]*usage{},
+		jobs:     jobs{list: map[string]*job{}},
 	}
 
 	mux := http.NewServeMux()
@@ -148,15 +151,20 @@ func main() {
 	mux.HandleFunc("/myip", s.handleMyIP)
 	mux.HandleFunc("/stream/", s.handleStream)
 	mux.HandleFunc("/status/", s.handleStatus)
+	mux.HandleFunc("/prebuffer", s.handlePrebuffer)
+	mux.HandleFunc("/prebuffer/", s.handlePrebuffer)
+	mux.HandleFunc("/check/", s.handleCheck)
+	mux.HandleFunc("/disk", s.handleDisk)
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(*host, strconv.Itoa(*port)))
 	if err != nil {
-		log.Fatalf("listen: %v", err)
+		fatal("cannot open a local port: %v", err)
 	}
 	// The parent parses this exact line.
 	fmt.Printf("VELORA_ENGINE_READY port=%d\n", ln.Addr().(*net.TCPAddr).Port)
 	_ = os.Stdout.Sync()
 
+	go s.loadJobs()
 	go s.sweepCache()
 	go func() { // parent died -> stdin closes -> exit
 		_, _ = io.Copy(io.Discard, os.Stdin)
@@ -266,6 +274,10 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg := s.admit(t, f); msg != "" {
+		http.Error(w, msg, http.StatusInsufficientStorage)
+		return
+	}
 	s.touch(t.InfoHash(), +1)
 	defer s.touch(t.InfoHash(), -1)
 
@@ -317,43 +329,10 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // sweepCache keeps the cache under its cap by dropping the least recently
-// used torrents that nobody is currently reading.
+// used torrents that nobody is currently reading and that are not pre-buffered.
 func (s *server) sweepCache() {
-	for range time.Tick(30 * time.Second) {
-		size := dirSize(s.dataDir)
-		if size <= s.maxCache {
-			continue
-		}
-		s.mu.Lock()
-		type cand struct {
-			h metainfo.Hash
-			u *usage
-		}
-		var cands []cand
-		for h, u := range s.used {
-			if u.readers == 0 {
-				cands = append(cands, cand{h, u})
-			}
-		}
-		sort.Slice(cands, func(i, j int) bool { return cands[i].u.last.Before(cands[j].u.last) })
-		s.mu.Unlock()
-
-		for _, c := range cands {
-			if size <= s.maxCache {
-				break
-			}
-			if t, ok := s.client.Torrent(c.h); ok {
-				name := t.Name()
-				t.Drop()
-				if name != "" {
-					_ = os.RemoveAll(filepath.Join(s.dataDir, name))
-				}
-			}
-			s.mu.Lock()
-			delete(s.used, c.h)
-			s.mu.Unlock()
-			size = dirSize(s.dataDir)
-		}
+	for range time.Tick(10 * time.Second) {
+		s.evictUntil(s.maxCache, metainfo.Hash{})
 	}
 }
 

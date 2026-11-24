@@ -24,6 +24,85 @@ class NetAdapter {
 
 enum EngineState { stopped, starting, ready, failed }
 
+/// Result of [EngineService.inspect].
+class PlayCheck {
+  const PlayCheck({this.message, this.size, this.idx});
+
+  /// Why the source cannot be played (shown to the user); null = fine.
+  final String? message;
+
+  /// Size of the video file, and its position in the torrent.
+  final int? size;
+  final int? idx;
+}
+
+/// Disk and cache numbers from the engine.
+class DiskInfo {
+  const DiskInfo({
+    required this.free,
+    required this.cacheBytes,
+    required this.maxCache,
+    required this.pinned,
+  });
+
+  /// Free space on the cache drive, or -1 if unknown.
+  final int free;
+  final int cacheBytes;
+  final int maxCache;
+
+  /// Space reserved by pre-buffered files.
+  final int pinned;
+
+  factory DiskInfo.fromJson(Map<String, dynamic> j) => DiskInfo(
+    free: (j['free'] as num?)?.toInt() ?? -1,
+    cacheBytes: (j['cacheBytes'] as num?)?.toInt() ?? 0,
+    maxCache: (j['maxCache'] as num?)?.toInt() ?? 0,
+    pinned: (j['pinned'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// A file being (or already) pre-buffered by the engine.
+class PrebufferJob {
+  const PrebufferJob({
+    required this.hash,
+    required this.idx,
+    required this.label,
+    required this.want,
+    required this.state,
+    required this.error,
+    required this.done,
+    required this.total,
+  });
+
+  final String hash;
+  final int idx;
+  final String label;
+
+  /// Bytes wanted from the start of the file; 0 = the whole file.
+  final int want;
+
+  /// metadata | downloading | ready | error
+  final String state;
+  final String error;
+  final int done;
+  final int total;
+
+  bool get isReady => state == 'ready';
+  bool get isError => state == 'error';
+  double? get progress => total <= 0 ? null : (done / total).clamp(0.0, 1.0);
+
+  factory PrebufferJob.fromJson(Map<String, dynamic> j) => PrebufferJob(
+    hash: '${j['hash']}',
+    idx: (j['idx'] as num?)?.toInt() ?? 0,
+    label: '${j['label'] ?? ''}',
+    want: (j['want'] as num?)?.toInt() ?? 0,
+    state: '${j['state'] ?? ''}',
+    error: '${j['error'] ?? ''}',
+    done: (j['done'] as num?)?.toInt() ?? 0,
+    total: (j['total'] as num?)?.toInt() ?? 0,
+  );
+}
+
 class EngineStatus {
   const EngineStatus({
     required this.name,
@@ -65,7 +144,7 @@ class EngineStatus {
 class EngineService extends ChangeNotifier {
   EngineService({
     this.cacheDir,
-    this.maxCacheGb = 4,
+    this.maxCacheGb = 8,
     this.uploadKbps = 1,
     this.noUpload = false,
     this.keepCache = true,
@@ -134,7 +213,7 @@ class EngineService extends ChangeNotifier {
       }
 
       final dir = cacheDir ?? p.join(Directory.systemTemp.path, 'velora-cache');
-      final process = await Process.start(exe, [
+      final started = Process.start(exe, [
         '--data-dir',
         dir,
         '--max-cache-gb',
@@ -145,6 +224,18 @@ class EngineService extends ChangeNotifier {
         if (!keepCache || _clearNext) '--fresh-cache',
         if (bindIp != null) ...['--bind-ip', bindIp!],
       ]);
+      final process = await started.timeout(
+        const Duration(seconds: 25),
+        onTimeout: () {
+          // Windows (usually an antivirus scan) is holding the program back.
+          unawaited(started.then((pr) => pr.kill()).catchError((_) => false));
+          throw EngineException(
+            'Windows is not letting the streaming engine start. An antivirus '
+            'may be scanning or blocking velora_engine.exe: add the Velora '
+            'folder to its exclusions, then try again.',
+          );
+        },
+      );
       _process = process;
       _clearNext = false; // a one-off wipe has been handed to the engine
 
@@ -189,7 +280,14 @@ class EngineService extends ChangeNotifier {
         }),
       );
 
-      final port = await ready.future.timeout(const Duration(seconds: 15));
+      final port = await ready.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw EngineException(
+          'The streaming engine did not respond. Check that the disk is not '
+          'full and that an antivirus or firewall is not blocking '
+          'velora_engine.exe.',
+        ),
+      );
       _baseUrl = 'http://127.0.0.1:$port';
       await _health();
       _set(EngineState.ready);
@@ -426,6 +524,121 @@ class EngineService extends ChangeNotifier {
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<Object?> _getJson(String path, {Duration? timeout}) async {
+    final base = _baseUrl;
+    if (base == null) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+    try {
+      final req = await client.getUrl(Uri.parse('$base$path'));
+      final res = await req.close().timeout(
+        timeout ?? const Duration(seconds: 8),
+      );
+      final body = await res.transform(utf8.decoder).join();
+      if (res.statusCode != 200) return null;
+      return jsonDecode(body);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Asks the engine whether a source may be played: it must fit the cache
+  /// limit and the free disk space. [PlayCheck.message] is set (for the user)
+  /// when it may not. (Waits while the engine finds the torrent.)
+  Future<PlayCheck> inspect({
+    required String infoHash,
+    int? fileIdx,
+    List<String> trackers = const [],
+    String? name,
+  }) async {
+    final uri = Uri(
+      path: '/check/${infoHash.toLowerCase()}/${fileIdx ?? 'auto'}',
+      queryParameters: {if (trackers.isNotEmpty) 'tr': trackers, 'dn': ?name},
+    );
+    final j = await _getJson(uri.toString(), timeout: metadataWait);
+    if (j is! Map) return const PlayCheck();
+    final m = '${j['message'] ?? ''}';
+    return PlayCheck(
+      message: j['ok'] == true || m.isEmpty ? null : m,
+      size: (j['size'] as num?)?.toInt(),
+      idx: (j['idx'] as num?)?.toInt(),
+    );
+  }
+
+  /// Message for the user if the source cannot be played, else null.
+  Future<String?> checkPlayable({
+    required String infoHash,
+    int? fileIdx,
+    List<String> trackers = const [],
+    String? name,
+  }) async => (await inspect(
+    infoHash: infoHash,
+    fileIdx: fileIdx,
+    trackers: trackers,
+    name: name,
+  )).message;
+
+  /// How long to wait for a torrent's file list before giving up on a check.
+  static const metadataWait = Duration(seconds: 80);
+
+  /// Files inside a torrent (index + path), or empty if unknown.
+  Future<List<({int idx, String path, int length})>> files(
+    String infoHash,
+  ) async {
+    final j = await _getJson('/status/${infoHash.toLowerCase()}');
+    if (j is! Map || j['files'] is! List) return const [];
+    return [
+      for (final f in j['files'] as List)
+        if (f is Map)
+          (
+            idx: (f['index'] as num?)?.toInt() ?? 0,
+            path: '${f['path'] ?? ''}'.replaceAll('\\', '/'),
+            length: (f['length'] as num?)?.toInt() ?? 0,
+          ),
+    ];
+  }
+
+  Future<DiskInfo?> disk() async {
+    final j = await _getJson('/disk');
+    return j is Map<String, dynamic> ? DiskInfo.fromJson(j) : null;
+  }
+
+  /// Starts downloading a file in the background and protects it from cache
+  /// clean-up. [want] limits it to the first N bytes (null/0 = all).
+  Future<bool> prebuffer({
+    required String infoHash,
+    required int fileIdx,
+    required String label,
+    int? want,
+    List<String> trackers = const [],
+    String? name,
+  }) async {
+    final uri = Uri(
+      path: '/prebuffer/${infoHash.toLowerCase()}/$fileIdx',
+      queryParameters: {
+        'label': label,
+        if (want != null && want > 0) 'want': '$want',
+        if (trackers.isNotEmpty) 'tr': trackers,
+        'dn': ?name,
+      },
+    );
+    final j = await _getJson(uri.toString());
+    return j is Map && j['ok'] == true;
+  }
+
+  Future<void> prebufferRemove(String infoHash, int fileIdx) =>
+      _getJson('/prebuffer/${infoHash.toLowerCase()}/$fileIdx?remove=1');
+
+  Future<List<PrebufferJob>> prebufferJobs() async {
+    final j = await _getJson('/prebuffer');
+    if (j is! List) return const [];
+    return [
+      for (final e in j)
+        if (e is Map<String, dynamic>) PrebufferJob.fromJson(e),
+    ];
   }
 
   /// Stops the engine politely: closing its stdin makes it flush and exit,

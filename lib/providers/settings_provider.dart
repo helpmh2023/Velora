@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:hive_ce/hive.dart';
 
@@ -8,7 +10,7 @@ import '../core/glass.dart';
 /// Settings screen has an "Apply" button for that).
 class SettingsProvider extends ChangeNotifier {
   SettingsProvider(this._box) {
-    _maxCacheGb = (_box?.get('maxCacheGb', defaultValue: 4.0) as num)
+    _maxCacheGb = (_box?.get('maxCacheGb', defaultValue: 8.0) as num)
         .toDouble();
     _uploadKbps = (_box?.get('uploadKbps', defaultValue: 1) as num).toInt();
     _allowUpload = _box?.get('allowUpload', defaultValue: true) as bool;
@@ -140,6 +142,35 @@ class SettingsProvider extends ChangeNotifier {
           .toSet();
   set traktWatchlistIds(Set<String> v) =>
       _box?.put('traktWatchlistIds', v.toList());
+
+  /// Pre-buffer only the start of an episode (instead of all of it).
+  bool get prebufferStartOnly =>
+      (_box?.get('prebufferStartOnly', defaultValue: false) as bool?) ?? false;
+  set prebufferStartOnly(bool v) {
+    _save('prebufferStartOnly', v);
+  }
+
+  /// While watching a series episode, quietly pre-buffer this many of the next
+  /// episodes (0 = off).
+  int get prebufferAhead =>
+      ((_box?.get('prebufferAhead', defaultValue: 0) as num?) ?? 0).toInt();
+  set prebufferAhead(int v) {
+    _save('prebufferAhead', v);
+  }
+
+  /// Secret in the "Play on iPad" links. Saved, so the link for an episode
+  /// stays the same between sessions (VLC then remembers where you were).
+  String get shareToken {
+    final saved = _box?.get('shareToken') as String?;
+    if (saved != null && saved.length >= 12) return saved;
+    final r = Random.secure();
+    final t = List.generate(
+      16,
+      (_) => 'abcdefghijklmnopqrstuvwxyz0123456789'[r.nextInt(36)],
+    ).join();
+    _box?.put('shareToken', t);
+    return t;
+  }
 
   AuroraQuality get auroraQualityValue => auroraQuality.value;
   set auroraQualityValue(AuroraQuality v) {

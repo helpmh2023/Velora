@@ -110,6 +110,7 @@ class ContinueCard extends StatelessWidget {
             [
               if (p.episodeLabel != null) p.episodeLabel!,
               leftLabel,
+              if (p.device != null) 'on ${p.device}',
             ].join('  -  '),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

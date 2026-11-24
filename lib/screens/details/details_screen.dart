@@ -7,6 +7,10 @@ import '../../core/smooth_scroll.dart';
 import '../../models/meta_item.dart';
 import '../../models/watch_progress.dart';
 import '../../providers/library_provider.dart';
+import '../../providers/prebuffer_provider.dart';
+import '../../services/next_episode.dart';
+import '../../widgets/prebuffer_button.dart';
+import '../../widgets/toast.dart';
 import '../../services/cinemeta_service.dart';
 import '../../widgets/aurora_background.dart' show auroraHolds;
 import '../../widgets/glass_button.dart';
@@ -63,15 +67,22 @@ class _DetailsScreenState extends State<DetailsScreen> {
     required String videoId,
     required String subtitle,
     Episode? episode,
+    bool forcePicker = false,
   }) async {
     final lib = context.read<LibraryProvider>();
-    final source = await showStreamPicker(
-      context,
-      type: _item.type,
-      videoId: videoId,
-      title: _item.name,
-      subtitle: subtitle,
-    );
+    // Already pre-buffered: play that copy, no need to choose again.
+    final pre = forcePicker
+        ? null
+        : context.read<PrebufferProvider>().sourceFor(videoId);
+    final source =
+        pre ??
+        await showStreamPicker(
+          context,
+          type: _item.type,
+          videoId: videoId,
+          title: _item.name,
+          subtitle: subtitle,
+        );
     if (source == null || !mounted) return;
     final saved = lib.progressFor(videoId);
     await openPlayer(
@@ -88,17 +99,117 @@ class _DetailsScreenState extends State<DetailsScreen> {
     );
   }
 
+  String _episodeLabel(Episode e) =>
+      '${_item.name}  -  S${e.season} E${e.number}  -  ${e.title}';
+
+  /// Pick a source, then download it ahead of time (episode, or the movie).
+  Future<void> _prebuffer(Episode? e) async {
+    final pb = context.read<PrebufferProvider>();
+    final id = e?.id ?? _item.id;
+    final label = e == null ? _item.name : _episodeLabel(e);
+    final source = await showStreamPicker(
+      context,
+      type: _item.type,
+      videoId: id,
+      title: _item.name,
+      subtitle: e == null
+          ? _movieSubtitle
+          : 'S${e.season} E${e.number}  -  ${e.title}',
+    );
+    if (source == null || !mounted) return;
+    showToast(context, 'Starting pre-buffer: $label');
+    final msg = await pb.start(
+      meta: _item,
+      videoId: id,
+      label: label,
+      source: source,
+      episode: e,
+    );
+    if (!mounted) return;
+    showToast(
+      context,
+      msg ?? 'Pre-buffering $label. It keeps going while you browse.',
+      error: msg != null,
+    );
+  }
+
+  /// Pre-buffer every aired episode of [season] that is not watched yet: pick a
+  /// source once, the rest use a matching one.
+  Future<void> _prebufferSeason(int season) async {
+    final pb = context.read<PrebufferProvider>();
+    final lib = context.read<LibraryProvider>();
+    final svc = context.read<NextEpisodeService>();
+    final now = DateTime.now();
+    final eps = _item
+        .episodesOf(season)
+        .where((e) => e.released == null || e.released!.isBefore(now))
+        .where((e) => !lib.isWatched(e.id) && pb.entryFor(e.id) == null)
+        .toList();
+    if (eps.isEmpty) {
+      showToast(context, 'Nothing left to pre-buffer in this season.');
+      return;
+    }
+    final first = eps.first;
+    final ref = await showStreamPicker(
+      context,
+      type: _item.type,
+      videoId: first.id,
+      title: _item.name,
+      subtitle:
+          'Season $season: pick the source to use (the other episodes get a matching one)',
+    );
+    if (ref == null || !mounted) return;
+    showToast(
+      context,
+      'Pre-buffering ${eps.length} episodes of season $season',
+    );
+    var started = 0;
+    String? stopped;
+    for (final e in eps) {
+      final src = e == first ? ref : await svc.sourceFor(e, ref);
+      if (src == null) {
+        stopped = 'No matching source for S${e.season} E${e.number}.';
+        break;
+      }
+      final msg = await pb.start(
+        meta: _item,
+        videoId: e.id,
+        label: _episodeLabel(e),
+        source: src,
+        episode: e,
+      );
+      if (msg != null) {
+        stopped = msg;
+        break;
+      }
+      started++;
+    }
+    if (!mounted) return;
+    showToast(
+      context,
+      stopped == null
+          ? 'Started $started episodes. They download in the background.'
+          : 'Started $started episodes, then stopped: $stopped',
+      error: stopped != null,
+    );
+  }
+
   String get _movieSubtitle => [
     if (_item.releaseInfo != null) _item.releaseInfo!,
     'Movie',
   ].join('  -  ');
 
-  void _playMovie() => _pick(videoId: _item.id, subtitle: _movieSubtitle);
+  void _playMovie({bool forcePicker = false}) => _pick(
+    videoId: _item.id,
+    subtitle: _movieSubtitle,
+    forcePicker: forcePicker,
+  );
 
-  void _playEpisode(Episode e) => _pick(
+  void _playEpisode(Episode e, {bool forcePicker = false}) => _pick(
     videoId: e.id,
     subtitle: 'S${e.season} E${e.number}  -  ${e.title}',
     episode: e,
+    forcePicker: forcePicker,
   );
 
   /// Continue exactly where we left off, with the same source if we have it.
@@ -225,6 +336,19 @@ class _DetailsScreenState extends State<DetailsScreen> {
                                       ? 'Loading episodes...'
                                       : 'Play S${_firstEpisode!.season} E${_firstEpisode!.number}')
                                 : 'Watch now',
+                            onChoose: () => nextUp != null
+                                ? _playEpisode(
+                                    nextUp.episode,
+                                    forcePicker: true,
+                                  )
+                                : (item.isSeries
+                                      ? (_firstEpisode == null
+                                            ? null
+                                            : _playEpisode(
+                                                _firstEpisode!,
+                                                forcePicker: true,
+                                              ))
+                                      : _playMovie(forcePicker: true)),
                             onPlay: nextUp != null
                                 ? () => _playEpisode(nextUp.episode)
                                 : (item.isSeries
@@ -252,6 +376,10 @@ class _DetailsScreenState extends State<DetailsScreen> {
                                       : null),
                             isFavourite: lib.isFavourite(item.id),
                             onToggleFavourite: () => lib.toggleFavourite(item),
+                            prebufferId: item.isSeries ? null : item.id,
+                            onPrebuffer: item.isSeries
+                                ? null
+                                : () => _prebuffer(null),
                           ),
                           if (item.isSeries && item.seasons.isNotEmpty) ...[
                             const SizedBox(height: 36),
@@ -260,6 +388,8 @@ class _DetailsScreenState extends State<DetailsScreen> {
                               season: _season ?? item.seasons.first,
                               onSeason: (s) => setState(() => _season = s),
                               onPlay: _playEpisode,
+                              onPrebuffer: (e) => _prebuffer(e),
+                              onPrebufferSeason: _prebufferSeason,
                             ),
                           ],
                         ],
@@ -300,20 +430,30 @@ class _Header extends StatelessWidget {
     required this.wide,
     required this.playLabel,
     required this.onPlay,
+    this.onChoose,
     required this.resumeLabel,
     required this.onResume,
     required this.isFavourite,
     required this.onToggleFavourite,
+    this.prebufferId,
+    this.onPrebuffer,
   });
 
   final MetaItem item;
   final bool wide;
   final String playLabel;
   final VoidCallback? onPlay;
+
+  /// "Choose source" (always opens the picker, even if pre-buffered).
+  final VoidCallback? onChoose;
   final String? resumeLabel;
   final VoidCallback? onResume;
   final bool isFavourite;
   final VoidCallback onToggleFavourite;
+
+  /// Movies only: where the pre-buffer state lives, and how to start one.
+  final String? prebufferId;
+  final VoidCallback? onPrebuffer;
 
   @override
   Widget build(BuildContext context) {
@@ -415,7 +555,7 @@ class _Header extends StatelessWidget {
               GlassButton(
                 label: 'Choose source',
                 icon: Icons.list_rounded,
-                onTap: onPlay ?? () {},
+                onTap: onChoose ?? onPlay ?? () {},
               ),
             ] else
               GlassButton(
@@ -430,6 +570,8 @@ class _Header extends StatelessWidget {
               icon: isFavourite ? Icons.check_rounded : Icons.add_rounded,
               onTap: onToggleFavourite,
             ),
+            if (prebufferId != null && onPrebuffer != null)
+              _MoviePrebuffer(videoId: prebufferId!, onStart: onPrebuffer!),
           ],
         ),
         if (item.directors.isNotEmpty || item.cast.isNotEmpty) ...[
@@ -505,12 +647,16 @@ class _Episodes extends StatelessWidget {
     required this.season,
     required this.onSeason,
     required this.onPlay,
+    required this.onPrebuffer,
+    required this.onPrebufferSeason,
   });
 
   final MetaItem item;
   final int season;
   final ValueChanged<int> onSeason;
   final ValueChanged<Episode> onPlay;
+  final ValueChanged<Episode> onPrebuffer;
+  final ValueChanged<int> onPrebufferSeason;
 
   @override
   Widget build(BuildContext context) {
@@ -519,9 +665,20 @@ class _Episodes extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Episodes',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Episodes',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+              ),
+            ),
+            GlassButton(
+              label: 'Pre-buffer season',
+              icon: Icons.download_rounded,
+              onTap: () => onPrebufferSeason(season),
+            ),
+          ],
         ),
         const SizedBox(height: 14),
         SingleChildScrollView(
@@ -549,6 +706,7 @@ class _Episodes extends StatelessWidget {
               progress: lib.progressFor(e.id),
               watched: lib.isWatched(e.id),
               onTap: () => onPlay(e),
+              onPrebuffer: () => onPrebuffer(e),
             ),
           ),
       ],
@@ -562,6 +720,7 @@ class _EpisodeTile extends StatelessWidget {
     required this.progress,
     required this.watched,
     required this.onTap,
+    required this.onPrebuffer,
   });
 
   final Episode episode;
@@ -570,6 +729,7 @@ class _EpisodeTile extends StatelessWidget {
   /// Watched here or on Trakt.
   final bool watched;
   final VoidCallback onTap;
+  final VoidCallback onPrebuffer;
 
   @override
   Widget build(BuildContext context) {
@@ -620,6 +780,7 @@ class _EpisodeTile extends StatelessWidget {
                   ),
                 ),
               ),
+              PrebufferButton(videoId: e.id, onStart: onPrebuffer),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Icon(
@@ -663,4 +824,42 @@ class _SeasonChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       GlassButton(label: label, primary: selected, onTap: onTap);
+}
+
+/// "Pre-buffer" button for a movie: shows progress / ready like the episode ones.
+class _MoviePrebuffer extends StatelessWidget {
+  const _MoviePrebuffer({required this.videoId, required this.onStart});
+
+  final String videoId;
+  final VoidCallback onStart;
+
+  @override
+  Widget build(BuildContext context) {
+    final pb = context.watch<PrebufferProvider>();
+    final entry = pb.entryFor(videoId);
+    final job = pb.jobFor(videoId);
+    if (entry == null) {
+      return GlassButton(
+        label: 'Pre-buffer',
+        icon: Icons.download_rounded,
+        onTap: onStart,
+      );
+    }
+    final label = (job?.isReady ?? false)
+        ? 'Ready  (remove)'
+        : (job?.isError ?? false)
+        ? 'Failed  (retry)'
+        : 'Pre-buffering ${((job?.progress ?? 0) * 100).round()}%  (cancel)';
+    return GlassButton(
+      label: label,
+      icon: (job?.isReady ?? false)
+          ? Icons.download_done_rounded
+          : Icons.downloading_rounded,
+      onTap: () async {
+        final failed = job?.isError ?? false;
+        await pb.remove(videoId);
+        if (failed) onStart();
+      },
+    );
+  }
 }

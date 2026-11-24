@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 import '../../core/smooth_scroll.dart';
 import '../../models/meta_item.dart';
 import '../../providers/library_provider.dart';
+import '../../providers/prebuffer_provider.dart';
+import '../../widgets/downloads_section.dart';
 import '../../widgets/continue_row.dart';
 import '../../widgets/poster_grid.dart';
 import '../home/home_screen.dart';
@@ -31,9 +33,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final cont = lib.continueWatching;
     final next = lib.nextUp;
     final favs = lib.favourites;
+    final downloads = context.watch<PrebufferProvider>().entries;
     void open(MetaItem m) => HomeScreen.openDetails(context, m);
 
-    if (cont.isEmpty && next.isEmpty && favs.isEmpty) {
+    if (cont.isEmpty && next.isEmpty && favs.isEmpty && downloads.isEmpty) {
       return const Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -62,8 +65,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       controller: _scroll,
       padding: const EdgeInsets.only(top: 12, bottom: 48),
       children: [
-        if (cont.isNotEmpty || next.isNotEmpty)
-          ContinueRow(items: cont, nextUp: next, onOpenDetails: open),
+        ContinueRow(items: cont, nextUp: next, onOpenDetails: open),
+        const DownloadsSection(),
         if (favs.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(40, 12, 40, 0),

@@ -14,6 +14,7 @@ class WatchProgress {
     this.season,
     this.episode,
     this.episodeTitle,
+    this.device,
   });
 
   /// Movie: IMDb id. Episode: `tt...:season:episode`.
@@ -26,6 +27,9 @@ class WatchProgress {
   final int? season;
   final int? episode;
   final String? episodeTitle;
+
+  /// Where it was watched when not on this PC (e.g. "iPad").
+  final String? device;
 
   Duration get position => Duration(milliseconds: positionMs);
   Duration get duration => Duration(milliseconds: durationMs);
@@ -55,6 +59,7 @@ class WatchProgress {
     'season': season,
     'episode': episode,
     'episodeTitle': episodeTitle,
+    'device': device,
   };
 
   factory WatchProgress.fromJson(Map<String, dynamic> j) => WatchProgress(
@@ -73,5 +78,6 @@ class WatchProgress {
     season: (j['season'] as num?)?.toInt(),
     episode: (j['episode'] as num?)?.toInt(),
     episodeTitle: j['episodeTitle'] as String?,
+    device: j['device'] as String?,
   );
 }

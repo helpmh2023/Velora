@@ -13,12 +13,16 @@ import '../../models/next_up.dart';
 import '../../models/stream_source.dart';
 import '../../models/watch_progress.dart';
 import '../../providers/library_provider.dart';
+import '../../providers/prebuffer_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/trakt_provider.dart';
 import '../../services/engine_service.dart';
 import '../../services/next_episode.dart';
 import '../../widgets/aurora_background.dart' show auroraHolds;
 import '../../widgets/glass_button.dart';
+import '../../widgets/share_dialog.dart';
+import '../../services/share_server.dart';
+import '../details/stream_picker.dart';
 import '../../widgets/glass_panel.dart';
 import '../../widgets/title_bar.dart';
 import 'open_player.dart';
@@ -83,6 +87,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _statsTimer;
   bool _showStats = false;
   PlayerStats? _stats;
+  String _uiLine = '';
+  late final PrebufferProvider _prebuffer;
+  late final SettingsProvider _settings;
+  bool _aheadQueued = false;
 
   // --- next episode ---
   late final NextEpisodeService _nextSvc;
@@ -119,8 +127,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _library = context.read<LibraryProvider>();
     _trakt = context.read<TraktProvider>();
     _nextSvc = context.read<NextEpisodeService>();
+    _prebuffer = context.read<PrebufferProvider>();
+    _settings = context.read<SettingsProvider>();
     _engine = context.read<EngineService>();
     _fullscreen = widget.startFullscreen;
+    UiFrameMeter.instance.start();
     _statsTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => _pollStats(),
@@ -176,6 +187,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
         name: widget.source.release,
       );
 
+      // Refuse early, with a clear reason, if the file cannot fit (cache
+      // limit or free disk space) instead of failing mid-stream.
+      final problem = await engine.checkPlayable(
+        infoHash: widget.source.infoHash,
+        fileIdx: widget.source.fileIdx,
+        trackers: widget.source.trackers,
+        name: widget.source.release,
+      );
+      if (problem != null) {
+        if (mounted) setState(() => _error = problem);
+        return;
+      }
+
       // The engine may need a while to find peers: be patient, and reconnect
       // if the HTTP range stream hiccups.
       final native = _player.platform;
@@ -212,7 +236,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final s = await PlayerStats.read(native);
     if (!mounted) return;
     latestPlayerStats.value = s;
-    if (_showStats) setState(() => _stats = s);
+    if (_showStats) {
+      setState(() {
+        _stats = s;
+        _uiLine = UiFrameMeter.instance.line();
+      });
+    }
   }
 
   /// Tell Trakt (if connected): start / pause / stop. Never blocks playback.
@@ -256,6 +285,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (!_handoff) unawaited(_recordNextUp());
     _saveTimer?.cancel();
     _statsTimer?.cancel();
+    UiFrameMeter.instance.stop();
     latestPlayerStats.value = null;
     _hideTimer?.cancel();
     _statusTimer?.cancel();
@@ -283,6 +313,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (!_isSeries || _duration <= Duration.zero) return;
     final frac = p.inMilliseconds / _duration.inMilliseconds;
 
+    // With "pre-buffer next episodes" on, start downloading them early: a
+    // whole episode needs far longer than the last few minutes.
+    if (!_aheadQueued && _settings.prebufferAhead > 0 && frac >= 0.08) {
+      _aheadQueued = true;
+      final ep = _currentEpisode;
+      if (ep != null) {
+        unawaited(
+          _prebuffer.queueAhead(
+            meta: widget.meta,
+            current: ep,
+            source: widget.source,
+          ),
+        );
+      }
+    }
+
     // Look up what is next once we are well into the episode, so it is ready.
     if (!_nextLookedUp && frac >= 0.55) {
       _nextLookedUp = true;
@@ -301,6 +347,97 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  /// Watch on another device (iPad): shows a QR code that opens this video
+  /// from this PC's engine.
+  Future<void> _shareToIpad() async {
+    var idx = widget.source.fileIdx;
+    if (idx == null) {
+      final c = await _engine.inspect(
+        infoHash: widget.source.infoHash,
+        trackers: widget.source.trackers,
+        name: widget.source.release,
+      );
+      idx = c.idx;
+    }
+    if (idx == null || !mounted) return;
+    final label = [
+      widget.meta.name,
+      if ((widget.subtitle ?? '').isNotEmpty) widget.subtitle!,
+    ].join('  -  ');
+    await showShareDialog(
+      context,
+      item: ShareItem(
+        id: '${widget.source.infoHash.toLowerCase()}-$idx',
+        label: label,
+        infoHash: widget.source.infoHash,
+        fileIdx: idx,
+        trackers: widget.source.trackers,
+        name: widget.source.release,
+        meta: widget.meta,
+        videoId: widget.videoId,
+        season: widget.season,
+        episode: widget.episode,
+        episodeTitle: widget.episodeTitle,
+        source: widget.source,
+      ),
+    );
+  }
+
+  /// Pick another source for what is playing and carry on from the exact same
+  /// moment: the new one only downloads from here on (the engine fetches only
+  /// what the player asks for), and the old one stops.
+  Future<void> _switchSource() async {
+    if (_handoff) return;
+    final pos = _position;
+    final dur = _duration;
+    final wasPlaying = _player.state.playing;
+    _player.pause();
+    final picked = await showStreamPicker(
+      context,
+      type: widget.meta.type,
+      videoId: widget.videoId,
+      title: widget.meta.name,
+      subtitle: widget.subtitle,
+    );
+    if (!mounted) return;
+    final same =
+        picked != null &&
+        picked.infoHash == widget.source.infoHash &&
+        picked.fileIdx == widget.source.fileIdx;
+    if (picked == null || same) {
+      if (wasPlaying) _player.play();
+      return;
+    }
+    _handoff = true;
+    _saveProgress();
+    _scrobble('stop');
+    _stopSent = true;
+    Navigator.of(context).pushReplacement(
+      playerRoute(
+        source: picked,
+        meta: widget.meta,
+        videoId: widget.videoId,
+        subtitle: widget.subtitle,
+        season: widget.season,
+        episode: widget.episode,
+        episodeTitle: widget.episodeTitle,
+        resumeFrom: pos,
+        knownDuration: dur,
+        fullscreen: _fullscreen,
+      ),
+    );
+  }
+
+  Episode? get _currentEpisode =>
+      widget.season == null || widget.episode == null
+      ? null
+      : Episode(
+          id: widget.videoId,
+          season: widget.season!,
+          number: widget.episode!,
+          title: widget.episodeTitle ?? '',
+        );
+
   /// Finds the next episode and a matching source, and warms the engine up.
   Future<void> _prepareNext() async {
     try {
@@ -312,10 +449,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted) return;
       setState(() => _nextEp = ep);
       if (ep == null) return; // last episode of the series, or not aired yet
-      final src = await _nextSvc.sourceFor(ep, widget.source);
+      final src =
+          _prebuffer.sourceFor(ep.id) ??
+          await _nextSvc.sourceFor(ep, widget.source);
       if (!mounted) return;
       setState(() => _nextSource = src);
-      if (src != null) {
+      if (src != null && _settings.prebufferAhead == 0) {
         unawaited(
           _engine.prefetch(
             infoHash: src.infoHash,
@@ -600,7 +739,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   Positioned(
                     left: 16,
                     top: 70,
-                    child: IgnorePointer(child: _StatsOverlay(_stats!)),
+                    child: IgnorePointer(
+                      child: _StatsOverlay(_stats!, _uiLine),
+                    ),
                   ),
                 _controlsLayer(),
                 _upNextOverlay(),
@@ -817,6 +958,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   label: (t) => t.id == 'no' ? 'Off' : _trackLabel(t),
                   onPick: _player.setSubtitleTrack,
                 ),
+                _IconBtn(
+                  icon: Icons.swap_horiz_rounded,
+                  tooltip: 'Switch source (keeps your place)',
+                  onTap: _switchSource,
+                ),
+                if (isDesktop)
+                  _IconBtn(
+                    icon: Icons.tablet_mac_rounded,
+                    tooltip: 'Play on iPad',
+                    onTap: _shareToIpad,
+                  ),
                 if (isDesktop)
                   _IconBtn(
                     icon: _fullscreen
@@ -1027,13 +1179,16 @@ class _ErrorOverlay extends StatelessWidget {
 }
 
 class _StatsOverlay extends StatelessWidget {
-  const _StatsOverlay(this.stats);
+  const _StatsOverlay(this.stats, this.uiLine);
 
   final PlayerStats stats;
+  final String uiLine;
 
   @override
   Widget build(BuildContext context) {
+    final verdict = UiFrameMeter.instance.verdict(stats.containerFps);
     final bad =
+        (verdict?.problem ?? false) ||
         stats.pausedForCache ||
         stats.decoderDrops > 0 ||
         stats.voDrops > 0 ||
@@ -1049,7 +1204,11 @@ class _StatsOverlay extends StatelessWidget {
         ),
       ),
       child: Text(
-        stats.describe().join('\n'),
+        [
+          ...stats.describe(),
+          if (uiLine.isNotEmpty) uiLine,
+          if (verdict != null) verdict.text,
+        ].join('\n'),
         style: const TextStyle(
           fontFamily: 'Consolas',
           fontSize: 12.5,

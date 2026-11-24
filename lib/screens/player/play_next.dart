@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../models/meta_item.dart';
 import '../../models/stream_source.dart';
 import '../../providers/library_provider.dart';
+import '../../providers/prebuffer_provider.dart';
 import '../../services/next_episode.dart';
 import '../../widgets/glass_panel.dart';
 import '../details/stream_picker.dart';
@@ -27,8 +28,33 @@ Future<bool> playEpisodeAuto(
 }) async {
   final svc = context.read<NextEpisodeService>();
   final library = context.read<LibraryProvider>();
+  final prebuffer = context.read<PrebufferProvider>();
   final nav = Navigator.of(context);
   final label = 'S${next.season} E${next.number}  -  ${next.title}';
+
+  // Pre-buffered already: play that copy straight away.
+  final pre = prebuffer.sourceFor(next.id);
+  if (pre != null) {
+    final saved = library.progressFor(next.id);
+    final route = playerRoute(
+      source: pre,
+      meta: meta,
+      videoId: next.id,
+      subtitle: label,
+      season: next.season,
+      episode: next.number,
+      episodeTitle: next.title,
+      resumeFrom: saved?.finished == true ? null : saved?.position,
+      knownDuration: saved?.duration,
+      fullscreen: fullscreen,
+    );
+    if (replace) {
+      nav.pushReplacement(route);
+    } else {
+      nav.push(route);
+    }
+    return true;
+  }
 
   showDialog<void>(
     context: context,

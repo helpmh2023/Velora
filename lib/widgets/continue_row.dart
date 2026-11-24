@@ -4,12 +4,15 @@ import 'package:provider/provider.dart';
 import '../models/meta_item.dart';
 import '../models/next_up.dart';
 import '../models/watch_progress.dart';
+import '../models/prebuffer_entry.dart';
 import '../providers/library_provider.dart';
+import '../providers/prebuffer_provider.dart';
 import '../screens/player/open_player.dart';
 import '../screens/player/play_next.dart';
 import 'continue_card.dart';
 import 'media_row.dart';
 import 'next_up_card.dart';
+import 'prebuffered_card.dart';
 
 /// "Continue Watching" shelf: things you are partway through (tap resumes
 /// straight into the player) and, for series, "Up next" episodes after one you
@@ -28,10 +31,23 @@ class ContinueRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Pre-buffered but not started yet (when downloads are available).
+    PrebufferProvider? pb;
+    try {
+      pb = context.watch<PrebufferProvider>();
+    } on ProviderNotFoundException {
+      pb = null;
+    }
+    final prebuffered = pb == null
+        ? const <PrebufferEntry>[]
+        : pb.continueCandidates(context.watch<LibraryProvider>());
+
     final entries = <({DateTime at, Object value})>[
       for (final p in items) (at: p.updatedAt, value: p),
       for (final n in nextUp) (at: n.updatedAt, value: n),
+      for (final e in prebuffered) (at: e.addedAt, value: e),
     ]..sort((a, b) => b.at.compareTo(a.at));
+    if (entries.isEmpty) return const SizedBox.shrink();
 
     return MediaRow(
       title: 'Continue Watching',
@@ -52,6 +68,30 @@ class ContinueRow extends StatelessWidget {
             ),
             onRemove: () =>
                 context.read<LibraryProvider>().clearNextUp(v.meta.id),
+          );
+        }
+        if (v is PrebufferEntry) {
+          return PrebufferedCard(
+            entry: v,
+            job: pb?.jobFor(v.videoId),
+            onTap: () {
+              final saved = context.read<LibraryProvider>().progressFor(
+                v.videoId,
+              );
+              openPlayer(
+                context,
+                source: v.source,
+                meta: v.meta,
+                videoId: v.videoId,
+                subtitle: v.label,
+                season: v.season,
+                episode: v.episode,
+                episodeTitle: v.episodeTitle,
+                resumeFrom: saved?.finished == true ? null : saved?.position,
+                knownDuration: saved?.duration,
+              );
+            },
+            onRemove: () => pb?.remove(v.videoId),
           );
         }
         final p = v as WatchProgress;

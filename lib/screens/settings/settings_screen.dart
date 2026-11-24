@@ -170,6 +170,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 _Row(
+                  title: 'Pre-buffer next episodes while watching',
+                  subtitle:
+                      'Quietly downloads the next episodes of a series in the background, '
+                      'so they start with no wait. Needs free space within the cache size above.',
+                  trailing: Text(
+                    s.prebufferAhead == 0
+                        ? 'Off'
+                        : '${s.prebufferAhead} episode${s.prebufferAhead == 1 ? '' : 's'}',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  below: _slider(
+                    value: s.prebufferAhead.toDouble(),
+                    min: 0,
+                    max: 3,
+                    divisions: 3,
+                    onChanged: (v) => s.prebufferAhead = v.round(),
+                  ),
+                ),
+                _Row(
+                  title: 'Pre-buffer only the start',
+                  subtitle:
+                      'Download just the first part of an episode (about 7 minutes) instead '
+                      'of all of it. Uses far less disk; the rest streams in as you watch.',
+                  trailing: Switch(
+                    value: s.prebufferStartOnly,
+                    onChanged: (v) => s.prebufferStartOnly = v,
+                  ),
+                ),
+                _Row(
                   title: 'Allow uploading',
                   subtitle:
                       'Torrents work by sharing pieces back. Turn off to leech only (some peers may throttle you).',
