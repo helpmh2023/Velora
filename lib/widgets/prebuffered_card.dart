@@ -32,7 +32,7 @@ class PrebufferedCard extends StatelessWidget {
     final color = ready ? const Color(0xFF69F0AE) : const Color(0xFF00E5FF);
     final badge = ready
         ? 'READY'
-        : 'DOWNLOADING${p == null ? '' : ' ${(p * 100).round()}%'}';
+        : 'BUFFERING${p == null ? '' : '  ${(p * 100).round()}%'}';
     final title = entry.meta.name;
     final sub = entry.season == null
         ? (entry.partial ? 'Start is ready' : 'Pre-buffered')
@@ -83,7 +83,10 @@ class PrebufferedCard extends StatelessWidget {
                     ),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(8),
-                      color: color.withValues(alpha: 0.22),
+                      color: Color.alphaBlend(
+                        color.withValues(alpha: 0.2),
+                        const Color(0xFF0B1424),
+                      ),
                       border: Border.all(color: color.withValues(alpha: 0.7)),
                     ),
                     child: Row(

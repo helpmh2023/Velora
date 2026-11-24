@@ -1,5 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
+import '../core/glass.dart';
+
 class BreathingVeloraLogo extends StatefulWidget {
   final double fontSize;
 
@@ -25,7 +27,8 @@ class _BreathingVeloraLogoState extends State<BreathingVeloraLogo>
       vsync: this,
       duration: const Duration(milliseconds: 2200),
     );
-    if (widget.breath == null) _controller.repeat(reverse: true);
+    auroraQuality.addListener(_syncLoop);
+    _syncLoop();
 
     _glowAnimation = Tween<double>(begin: 4.0, end: 22.0).animate(
       widget.breath ??
@@ -33,14 +36,33 @@ class _BreathingVeloraLogoState extends State<BreathingVeloraLogo>
     );
   }
 
+  /// The glow only loops when the animated background is at full quality.
+  /// An endless animation wakes the GPU on every screen refresh, which is
+  /// exactly what "Off" and "Smooth" are meant to avoid.
+  void _syncLoop() {
+    if (widget.breath != null) return;
+    final animate = auroraQuality.value == AuroraQuality.full;
+    if (animate) {
+      if (!_controller.isAnimating) _controller.repeat(reverse: true);
+    } else {
+      _controller.stop();
+      _controller.value = 0.5; // rest at a mid glow
+    }
+  }
+
   @override
   void dispose() {
+    auroraQuality.removeListener(_syncLoop);
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    return RepaintBoundary(child: _glow());
+  }
+
+  Widget _glow() {
     return AnimatedBuilder(
       animation: _glowAnimation,
       builder: (context, child) {
